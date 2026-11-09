@@ -108,7 +108,8 @@ esp_err_t sd_card_init(void)
 
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
 
-    host.slot = SDMMC_HOST_SLOT_1;
+    /* GPIO39-44 are slot 0's fixed pins; slot 1 is reserved for C5 SDIO. */
+    host.slot = SDMMC_HOST_SLOT_0;
     host.max_freq_khz = SDMMC_FREQ_DEFAULT;
 
     // -------------------------------------------------

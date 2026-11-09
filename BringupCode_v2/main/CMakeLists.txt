@@ -5,6 +5,8 @@ idf_component_register(
         "sd_card.c"
         "imu.c"
         "audio.c"
+        "camera.c"
+        "wifi_test.c"
 
     INCLUDE_DIRS
         "."
@@ -14,9 +16,18 @@ idf_component_register(
         esp_driver_gpio
         esp_driver_i2c
         esp_driver_i2s
+        esp_driver_jpeg
         esp_driver_sdmmc
         esp_codec_dev
         spi_flash
         sdmmc
         fatfs
+        esp_video
+        esp_cam_sensor
+        esp_psram
+        esp_hosted
+        esp_wifi
+        esp_event
+        esp_netif
+        nvs_flash
 )

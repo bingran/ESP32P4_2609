@@ -26,40 +26,37 @@
 // CONFIGURATION
 // =====================================================
 
-#define TAG                 "AUDIO"
+#define TAG                     "AUDIO"
 
-// Power control
-#define CODEC_EN_GPIO       GPIO_NUM_5
-#define PA_CTRL_GPIO        GPIO_NUM_4
+#define CODEC_EN_GPIO           GPIO_NUM_5
+#define PA_CTRL_GPIO            GPIO_NUM_4
 
-// Shared I2C bus
-#define AUDIO_I2C_PORT      I2C_NUM_0
-#define AUDIO_I2C_SDA       GPIO_NUM_7
-#define AUDIO_I2C_SCL       GPIO_NUM_8
-#define AUDIO_I2C_FREQ_HZ   100000
+#define AUDIO_I2C_PORT          I2C_NUM_0
+#define AUDIO_I2C_SDA           GPIO_NUM_7
+#define AUDIO_I2C_SCL           GPIO_NUM_8
+#define AUDIO_I2C_FREQ_HZ       100000
 
-// I2S
-#define AUDIO_I2S_PORT      I2S_NUM_0
+#define AUDIO_I2S_PORT          I2S_NUM_0
 
-#define AUDIO_MCLK_GPIO     GPIO_NUM_13
-#define AUDIO_BCLK_GPIO     GPIO_NUM_12
-#define AUDIO_DIN_GPIO      GPIO_NUM_11
-#define AUDIO_LRCK_GPIO     GPIO_NUM_10
-#define AUDIO_DOUT_GPIO     GPIO_NUM_9
+#define AUDIO_MCLK_GPIO         GPIO_NUM_13
+#define AUDIO_BCLK_GPIO         GPIO_NUM_12
+#define AUDIO_DIN_GPIO          GPIO_NUM_11
+#define AUDIO_LRCK_GPIO         GPIO_NUM_10
+#define AUDIO_DOUT_GPIO         GPIO_NUM_9
 
+#define AUDIO_SAMPLE_RATE       16000
+#define AUDIO_BIT_WIDTH         I2S_DATA_BIT_WIDTH_16BIT
 
-// Audio format
-#define AUDIO_SAMPLE_RATE   16000
-#define AUDIO_BIT_WIDTH     I2S_DATA_BIT_WIDTH_16BIT
+#define AUDIO_BEEP_VOLUME       40
+#define AUDIO_MUSIC_VOLUME      70
 
-// Independent output volume
-#define AUDIO_BEEP_VOLUME   40
-#define AUDIO_MUSIC_VOLUME  70
+#define AUDIO_MCLK_MULTIPLE     I2S_MCLK_MULTIPLE_256
 
-#define AUDIO_MCLK_MULTIPLE I2S_MCLK_MULTIPLE_256
+#define AUDIO_TONE_AMPLITUDE    28000
 
-// Test tone amplitude
-#define AUDIO_TONE_AMPLITUDE 28000
+// Microphone gain baseline.
+// Start at +20 dB to avoid unnecessarily amplifying background noise.
+#define MIC_INPUT_GAIN_DB       20.0f
 
 // =====================================================
 // GLOBAL HANDLES
@@ -90,15 +87,11 @@ static esp_err_t audio_set_output_volume(int volume)
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_err_t ret = esp_codec_dev_set_out_vol(
-        audio_codec,
-        volume
-    );
+    esp_err_t ret = esp_codec_dev_set_out_vol(audio_codec, volume);
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to set volume to %d: %s",
-                 volume,
-                 esp_err_to_name(ret));
+                 volume, esp_err_to_name(ret));
         return ret;
     }
 
@@ -117,12 +110,9 @@ static esp_err_t audio_power_init(void)
         .pin_bit_mask =
             (1ULL << CODEC_EN_GPIO) |
             (1ULL << PA_CTRL_GPIO),
-
         .mode = GPIO_MODE_OUTPUT,
-
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-
         .intr_type = GPIO_INTR_DISABLE,
     };
 
@@ -132,34 +122,29 @@ static esp_err_t audio_power_init(void)
         return ret;
     }
 
-    // Keep speaker amplifier disabled
+    // Keep speaker amplifier disabled.
     ret = gpio_set_level(PA_CTRL_GPIO, 0);
-
     if (ret != ESP_OK) {
         return ret;
     }
 
-    // Turn off codec and microphone supply before startup
+    // Power-cycle codec and microphone rail.
     ret = gpio_set_level(CODEC_EN_GPIO, 0);
-
     if (ret != ESP_OK) {
         return ret;
     }
 
     vTaskDelay(pdMS_TO_TICKS(20));
 
-    // Enable 3.3V codec and microphone supply
     ret = gpio_set_level(CODEC_EN_GPIO, 1);
-
     if (ret != ESP_OK) {
         return ret;
     }
 
-    // Allow power rail to stabilize
     vTaskDelay(pdMS_TO_TICKS(50));
 
     ESP_LOGI(TAG, "CODEC_EN GPIO5 HIGH");
-    ESP_LOGI(TAG, "Codec/microphone 3.3V rail enabled");
+    ESP_LOGI(TAG, "Codec/microphone supply enabled");
     ESP_LOGI(TAG, "PA_CTRL GPIO4 LOW");
 
     return ESP_OK;
@@ -173,13 +158,10 @@ static esp_err_t audio_i2c_init(void)
 {
     i2c_master_bus_config_t bus_config = {
         .i2c_port = AUDIO_I2C_PORT,
-
         .sda_io_num = AUDIO_I2C_SDA,
         .scl_io_num = AUDIO_I2C_SCL,
-
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .glitch_ignore_cnt = 7,
-
         .flags.enable_internal_pullup = true,
     };
 
@@ -191,13 +173,11 @@ static esp_err_t audio_i2c_init(void)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "I2C initialization failed: %s",
                  esp_err_to_name(ret));
-
         return ret;
     }
 
     ESP_LOGI(TAG, "I2C initialized: SDA=%d SCL=%d",
-             AUDIO_I2C_SDA,
-             AUDIO_I2C_SCL);
+             AUDIO_I2C_SDA, AUDIO_I2C_SCL);
 
     return ESP_OK;
 }
@@ -216,7 +196,6 @@ static esp_err_t audio_i2s_init(void)
 
     channel_config.auto_clear = true;
 
-    // Create full-duplex TX and RX channels.
     esp_err_t ret = i2s_new_channel(
         &channel_config,
         &audio_tx_handle,
@@ -257,7 +236,6 @@ static esp_err_t audio_i2s_init(void)
     standard_config.clk_cfg.mclk_multiple =
         AUDIO_MCLK_MULTIPLE;
 
-    // Initialize TX.
     ret = i2s_channel_init_std_mode(
         audio_tx_handle,
         &standard_config
@@ -269,7 +247,6 @@ static esp_err_t audio_i2s_init(void)
         return ret;
     }
 
-    // Initialize RX.
     ret = i2s_channel_init_std_mode(
         audio_rx_handle,
         &standard_config
@@ -281,7 +258,6 @@ static esp_err_t audio_i2s_init(void)
         return ret;
     }
 
-    // Enable TX.
     ret = i2s_channel_enable(audio_tx_handle);
 
     if (ret != ESP_OK) {
@@ -290,7 +266,6 @@ static esp_err_t audio_i2s_init(void)
         return ret;
     }
 
-    // Enable RX.
     ret = i2s_channel_enable(audio_rx_handle);
 
     if (ret != ESP_OK) {
@@ -324,32 +299,26 @@ static esp_err_t audio_codec_init(void)
         .rx_handle = audio_rx_handle,
     };
 
-    audio_data_if = audio_codec_new_i2s_data(
-        &i2s_config
-    );
+    audio_data_if = audio_codec_new_i2s_data(&i2s_config);
 
     if (audio_data_if == NULL) {
         ESP_LOGE(TAG, "Cannot create I2S data interface");
         return ESP_FAIL;
     }
 
-    // Create I2C control interface
     audio_codec_i2c_cfg_t i2c_config = {
         .port = AUDIO_I2C_PORT,
         .addr = ES8311_CODEC_DEFAULT_ADDR,
         .bus_handle = audio_i2c_bus,
     };
 
-    audio_ctrl_if = audio_codec_new_i2c_ctrl(
-        &i2c_config
-    );
+    audio_ctrl_if = audio_codec_new_i2c_ctrl(&i2c_config);
 
     if (audio_ctrl_if == NULL) {
         ESP_LOGE(TAG, "Cannot create ES8311 I2C interface");
         return ESP_FAIL;
     }
 
-    // Create GPIO interface for amplifier control
     audio_gpio_if = audio_codec_new_gpio();
 
     if (audio_gpio_if == NULL) {
@@ -357,56 +326,49 @@ static esp_err_t audio_codec_init(void)
         return ESP_FAIL;
     }
 
-    // ES8311 configuration
     es8311_codec_cfg_t codec_config = {
         .ctrl_if = audio_ctrl_if,
         .gpio_if = audio_gpio_if,
         .codec_mode = ESP_CODEC_DEV_WORK_MODE_BOTH,
         .no_dac_ref = true,
 
-        // ESP32 is I2S master
+        // ESP32 is I2S master.
         .master_mode = false,
 
         .use_mclk = true,
 
-        // NS4150B amplifier control
+        // NS4150B amplifier control.
         .pa_pin = PA_CTRL_GPIO,
         .pa_reverted = false,
 
+        // LMA3729T421-OA5 is an analog-output microphone.
         .digital_mic = false,
+
         .invert_mclk = false,
         .invert_sclk = false,
-
         .mclk_div = 256,
     };
 
-    audio_codec_if = es8311_codec_new(
-        &codec_config
-    );
+    audio_codec_if = es8311_codec_new(&codec_config);
 
     if (audio_codec_if == NULL) {
         ESP_LOGE(TAG, "ES8311 driver creation failed");
         return ESP_FAIL;
     }
 
-    // Create codec device
     esp_codec_dev_cfg_t device_config = {
         .dev_type = ESP_CODEC_DEV_TYPE_IN_OUT,
-
         .codec_if = audio_codec_if,
         .data_if = audio_data_if,
     };
 
-    audio_codec = esp_codec_dev_new(
-        &device_config
-    );
+    audio_codec = esp_codec_dev_new(&device_config);
 
     if (audio_codec == NULL) {
         ESP_LOGE(TAG, "ES8311 codec device creation failed");
         return ESP_FAIL;
     }
 
-    // Audio format
     esp_codec_dev_sample_info_t sample_config = {
         .sample_rate = AUDIO_SAMPLE_RATE,
         .channel = 2,
@@ -415,29 +377,32 @@ static esp_err_t audio_codec_init(void)
         .mclk_multiple = 256,
     };
 
-    // Open codec
+    // Open codec first.
     esp_err_t ret = esp_codec_dev_open(
         audio_codec,
         &sample_config
     );
 
-    // Set microphone input gain to +20 dB.
-    int gain_ret = esp_codec_dev_set_in_gain(audio_codec, 30.0f);
-
-    if (gain_ret == ESP_CODEC_DEV_OK) {
-        ESP_LOGI(TAG, "Microphone input gain set to +30 dB");
-    } else {
-        ESP_LOGE(TAG, "Failed to set microphone input gain: %d", gain_ret);
-    }
-
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "ES8311 open failed: %s",
                  esp_err_to_name(ret));
-
         return ret;
     }
 
-    // Default to beep volume
+    // Configure microphone gain only after successful open.
+    int gain_ret = esp_codec_dev_set_in_gain(
+        audio_codec,
+        MIC_INPUT_GAIN_DB
+    );
+
+    if (gain_ret == ESP_CODEC_DEV_OK) {
+        ESP_LOGI(TAG, "Microphone input gain configured: %.1f dB",
+                 (double)MIC_INPUT_GAIN_DB);
+    } else {
+        ESP_LOGE(TAG, "Microphone input gain configuration failed: %d",
+                 gain_ret);
+    }
+
     ret = audio_set_output_volume(AUDIO_BEEP_VOLUME);
 
     if (ret != ESP_OK) {
@@ -468,28 +433,22 @@ esp_err_t audio_init(void)
     ESP_LOGI(TAG, "       AUDIO DIAGNOSTIC");
     ESP_LOGI(TAG, "================================");
 
-    esp_err_t ret;
-
-    ret = audio_power_init();
-
+    esp_err_t ret = audio_power_init();
     if (ret != ESP_OK) {
         return ret;
     }
 
     ret = audio_i2c_init();
-
     if (ret != ESP_OK) {
         return ret;
     }
 
     ret = audio_i2s_init();
-
     if (ret != ESP_OK) {
         return ret;
     }
 
     ret = audio_codec_init();
-
     if (ret != ESP_OK) {
         return ret;
     }
@@ -533,16 +492,14 @@ esp_err_t audio_play_test_tone(
              (unsigned long)frequency_hz,
              (unsigned long)duration_ms);
 
-    // Set lower volume for beep/test tone
     esp_err_t ret = audio_set_output_volume(AUDIO_BEEP_VOLUME);
 
     if (ret != ESP_OK) {
         return ret;
     }
 
-    // Enable NS4150B for the ENTIRE playback
     gpio_set_level(PA_CTRL_GPIO, 1);
-    ESP_LOGI(TAG, "PA_CTRL forced HIGH (amplifier enabled)");
+    ESP_LOGI(TAG, "PA_CTRL HIGH (amplifier enabled)");
 
     vTaskDelay(pdMS_TO_TICKS(100));
 
@@ -553,8 +510,6 @@ esp_err_t audio_play_test_tone(
         (AUDIO_SAMPLE_RATE * duration_ms) / 1000;
 
     uint32_t frames_written = 0;
-
-    ret = ESP_OK;
 
     while (frames_written < total_frames) {
 
@@ -594,9 +549,8 @@ esp_err_t audio_play_test_tone(
         frames_written += frames_this_block;
     }
 
-    // Disable amplifier only AFTER all playback is complete
     gpio_set_level(PA_CTRL_GPIO, 0);
-    ESP_LOGI(TAG, "PA_CTRL forced LOW (amplifier disabled)");
+    ESP_LOGI(TAG, "PA_CTRL LOW (amplifier disabled)");
 
     if (ret != ESP_OK) {
         return ret;
@@ -611,10 +565,10 @@ esp_err_t audio_play_test_tone(
 // WAV FILE PLAYBACK
 // =====================================================
 
-#define WAV_TAG             "WAV"
-#define WAV_SAMPLE_RATE     16000
-#define WAV_BITS_PER_SAMPLE 16
-#define WAV_BUFFER_FRAMES   256
+#define WAV_TAG                 "WAV"
+#define WAV_SAMPLE_RATE         16000
+#define WAV_BITS_PER_SAMPLE     16
+#define WAV_BUFFER_FRAMES       256
 
 static uint16_t wav_read_u16(FILE *file, bool *ok)
 {
@@ -688,8 +642,6 @@ esp_err_t audio_play_wav_file(const char *path)
     bool fmt_found = false;
     bool data_found = false;
 
-    // Search RIFF chunks. This also handles optional chunks
-    // such as LIST and JUNK before the audio data.
     while (!feof(file)) {
 
         uint8_t chunk_id[4];
@@ -722,7 +674,6 @@ esp_err_t audio_play_wav_file(const char *path)
             channels = wav_read_u16(file, &ok);
             sample_rate = wav_read_u32(file, &ok);
 
-            // Byte rate
             (void)wav_read_u32(file, &ok);
 
             block_align = wav_read_u16(file, &ok);
@@ -733,7 +684,6 @@ esp_err_t audio_play_wav_file(const char *path)
                 goto cleanup;
             }
 
-            // Skip any additional fmt bytes.
             if (fseek(file, (long)(chunk_size - 16), SEEK_CUR) != 0) {
                 ESP_LOGE(WAV_TAG, "Cannot skip fmt extension");
                 goto cleanup;
@@ -748,14 +698,12 @@ esp_err_t audio_play_wav_file(const char *path)
             break;
         }
         else {
-            // Skip unsupported/unused RIFF chunks.
             if (fseek(file, (long)chunk_size, SEEK_CUR) != 0) {
                 ESP_LOGE(WAV_TAG, "Cannot skip WAV chunk");
                 goto cleanup;
             }
         }
 
-        // RIFF chunks are padded to an even byte boundary.
         if (chunk_size & 1) {
             if (fseek(file, 1, SEEK_CUR) != 0) {
                 ESP_LOGE(WAV_TAG, "Cannot skip chunk padding");
@@ -784,7 +732,6 @@ esp_err_t audio_play_wav_file(const char *path)
         ESP_LOGE(WAV_TAG,
                  "Unsupported WAV format. "
                  "Expected PCM, 16kHz, 16-bit, mono/stereo.");
-
         goto cleanup;
     }
 
@@ -801,14 +748,12 @@ esp_err_t audio_play_wav_file(const char *path)
 
     ESP_LOGI(WAV_TAG, "Starting WAV playback: %s", path);
 
-    // Set higher volume for music
     ret = audio_set_output_volume(AUDIO_MUSIC_VOLUME);
 
     if (ret != ESP_OK) {
         goto cleanup;
     }
 
-    // Keep the amplifier enabled for the entire playback.
     gpio_set_level(PA_CTRL_GPIO, 1);
     vTaskDelay(pdMS_TO_TICKS(100));
 
@@ -816,8 +761,7 @@ esp_err_t audio_play_wav_file(const char *path)
 
     while (bytes_remaining > 0) {
 
-        uint32_t frames =
-            bytes_remaining / block_align;
+        uint32_t frames = bytes_remaining / block_align;
 
         if (frames > WAV_BUFFER_FRAMES) {
             frames = WAV_BUFFER_FRAMES;
@@ -825,8 +769,12 @@ esp_err_t audio_play_wav_file(const char *path)
 
         size_t input_bytes = frames * block_align;
 
-        size_t bytes_read =
-            fread(input_buffer, 1, input_bytes, file);
+        size_t bytes_read = fread(
+            input_buffer,
+            1,
+            input_bytes,
+            file
+        );
 
         if (bytes_read != input_bytes) {
             ESP_LOGE(WAV_TAG, "WAV read error");
@@ -835,13 +783,11 @@ esp_err_t audio_play_wav_file(const char *path)
         }
 
         if (channels == 1) {
-            // Duplicate mono samples to left and right.
             for (uint32_t i = 0; i < frames; i++) {
                 stereo_buffer[i * 2] = input_buffer[i];
                 stereo_buffer[i * 2 + 1] = input_buffer[i];
             }
         } else {
-            // Stereo input is already in the required format.
             memcpy(stereo_buffer, input_buffer, input_bytes);
         }
 
@@ -861,7 +807,6 @@ esp_err_t audio_play_wav_file(const char *path)
         frames_played += frames;
     }
 
-    // Disable amplifier after playback.
     gpio_set_level(PA_CTRL_GPIO, 0);
 
     if (ret == ESP_OK) {
@@ -874,7 +819,6 @@ cleanup:
 
     fclose(file);
 
-    
     if (ret != ESP_OK) {
         ESP_LOGE(WAV_TAG, "WAV playback failed");
     }
@@ -886,13 +830,13 @@ cleanup:
 // MICROPHONE WAV RECORDING
 // =====================================================
 
-#define MIC_TAG                 "MIC"
+#define MIC_TAG                     "MIC"
 
-#define MIC_RECORD_SAMPLE_RATE  16000
-#define MIC_RECORD_CHANNELS     1
-#define MIC_RECORD_BITS         16
+#define MIC_RECORD_SAMPLE_RATE      16000
+#define MIC_RECORD_CHANNELS         1
+#define MIC_RECORD_BITS             16
 
-#define MIC_RECORD_BUFFER_FRAMES 256
+#define MIC_RECORD_BUFFER_FRAMES    256
 
 static void mic_write_le16(uint8_t *p, uint16_t value)
 {
@@ -931,7 +875,7 @@ static esp_err_t mic_write_wav_header(
     memcpy(&header[12], "fmt ", 4);
     mic_write_le32(&header[16], 16);
 
-    mic_write_le16(&header[20], 1);  // PCM
+    mic_write_le16(&header[20], 1);
     mic_write_le16(&header[22], MIC_RECORD_CHANNELS);
 
     mic_write_le32(&header[24], MIC_RECORD_SAMPLE_RATE);
@@ -954,6 +898,9 @@ static esp_err_t mic_write_wav_header(
     return ESP_OK;
 }
 
+// =====================================================
+// MICROPHONE RECORDING FUNCTION
+// =====================================================
 
 esp_err_t audio_record_wav_file(
     const char *path,
@@ -976,6 +923,8 @@ esp_err_t audio_record_wav_file(
     ESP_LOGI(MIC_TAG, "Duration: %" PRIu32 " ms", duration_ms);
     ESP_LOGI(MIC_TAG, "Sample rate: %d Hz", MIC_RECORD_SAMPLE_RATE);
     ESP_LOGI(MIC_TAG, "Format: 16-bit PCM mono");
+    ESP_LOGI(MIC_TAG, "Input gain: %.1f dB",
+             (double)MIC_INPUT_GAIN_DB);
 
     FILE *file = fopen(path, "wb+");
 
@@ -989,7 +938,6 @@ esp_err_t audio_record_wav_file(
     // Disable speaker amplifier during recording.
     gpio_set_level(PA_CTRL_GPIO, 0);
 
-    // Write initial empty WAV header.
     ret = mic_write_wav_header(file, 0);
 
     if (ret != ESP_OK) {
@@ -1007,7 +955,6 @@ esp_err_t audio_record_wav_file(
     uint32_t frames_recorded = 0;
     uint32_t data_size = 0;
 
-    // Microphone diagnostic statistics.
     int16_t left_min = INT16_MAX;
     int16_t left_max = INT16_MIN;
     int16_t right_min = INT16_MAX;
@@ -1015,6 +962,9 @@ esp_err_t audio_record_wav_file(
 
     uint64_t left_sum_sq = 0;
     uint64_t right_sum_sq = 0;
+
+    int64_t left_sum = 0;
+    int64_t right_sum = 0;
 
     uint32_t left_nonzero = 0;
     uint32_t right_nonzero = 0;
@@ -1024,8 +974,7 @@ esp_err_t audio_record_wav_file(
 
     while (frames_recorded < total_frames) {
 
-        uint32_t frames_this_block =
-            MIC_RECORD_BUFFER_FRAMES;
+        uint32_t frames_this_block = MIC_RECORD_BUFFER_FRAMES;
 
         if (frames_recorded + frames_this_block > total_frames) {
             frames_this_block = total_frames - frames_recorded;
@@ -1034,18 +983,14 @@ esp_err_t audio_record_wav_file(
         size_t input_bytes =
             frames_this_block * 2 * sizeof(int16_t);
 
-        // Read stereo data from ES8311.
         int read_ret = esp_codec_dev_read(
             audio_codec,
             stereo_buffer,
             input_bytes
         );
 
-        // Never analyse the buffer if reading failed.
         if (read_ret != ESP_CODEC_DEV_OK) {
-            ESP_LOGE(MIC_TAG,
-                     "Microphone read failed: %d",
-                     read_ret);
+            ESP_LOGE(MIC_TAG, "Microphone read failed: %d", read_ret);
             ret = ESP_FAIL;
             break;
         }
@@ -1062,8 +1007,11 @@ esp_err_t audio_record_wav_file(
             if (right < right_min) right_min = right;
             if (right > right_max) right_max = right;
 
-            left_sum_sq += (int32_t)left * left;
-            right_sum_sq += (int32_t)right * right;
+            left_sum += left;
+            right_sum += right;
+
+            left_sum_sq += (int64_t)left * left;
+            right_sum_sq += (int64_t)right * right;
 
             if (left != 0) left_nonzero++;
             if (right != 0) right_nonzero++;
@@ -1103,10 +1051,8 @@ esp_err_t audio_record_wav_file(
         }
     }
 
-    // Keep speaker amplifier disabled.
     gpio_set_level(PA_CTRL_GPIO, 0);
 
-    // Finalise WAV header.
     esp_err_t header_ret = mic_write_wav_header(file, data_size);
 
     if (header_ret != ESP_OK) {
@@ -1114,16 +1060,27 @@ esp_err_t audio_record_wav_file(
         ret = ESP_FAIL;
     }
 
-    // Print microphone diagnostics.
+    // Microphone diagnostics.
     if (diagnostic_frames > 0) {
 
-        double left_rms = sqrt(
-            (double)left_sum_sq / diagnostic_frames
-        );
+        double left_mean =
+            (double)left_sum / diagnostic_frames;
 
-        double right_rms = sqrt(
-            (double)right_sum_sq / diagnostic_frames
-        );
+        double right_mean =
+            (double)right_sum / diagnostic_frames;
+
+        // Remove DC offset before calculating AC RMS.
+        double left_mean_sq =
+            (double)left_sum_sq / diagnostic_frames;
+
+        double right_mean_sq =
+            (double)right_sum_sq / diagnostic_frames;
+
+        double left_rms =
+            sqrt(fmax(0.0, left_mean_sq - left_mean * left_mean));
+
+        double right_rms =
+            sqrt(fmax(0.0, right_mean_sq - right_mean * right_mean));
 
         ESP_LOGI(MIC_TAG,
                  "========== MIC SAMPLE DIAGNOSTIC ==========");
@@ -1136,8 +1093,11 @@ esp_err_t audio_record_wav_file(
                  "RIGHT: min=%d max=%d nonzero=%" PRIu32,
                  right_min, right_max, right_nonzero);
 
-        ESP_LOGI(MIC_TAG, "LEFT RMS : %.2f", left_rms);
-        ESP_LOGI(MIC_TAG, "RIGHT RMS: %.2f", right_rms);
+        ESP_LOGI(MIC_TAG, "LEFT DC OFFSET : %.2f", left_mean);
+        ESP_LOGI(MIC_TAG, "RIGHT DC OFFSET: %.2f", right_mean);
+
+        ESP_LOGI(MIC_TAG, "LEFT AC RMS : %.2f", left_rms);
+        ESP_LOGI(MIC_TAG, "RIGHT AC RMS: %.2f", right_rms);
 
         ESP_LOGI(MIC_TAG,
                  "Diagnostic frames: %" PRIu32,
@@ -1163,5 +1123,3 @@ esp_err_t audio_record_wav_file(
 
     return ret;
 }
-
-

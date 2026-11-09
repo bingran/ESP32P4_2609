@@ -15,3 +15,8 @@ dependencies:
   #   # All dependencies of `main` are public by default.
   #   public: true
   espressif/esp_codec_dev: ==1.5.8
+  espressif/esp_video: ^2.3.0
+  espressif/esp_cam_sensor: ^2.3.0
+  # Match the installed C5 firmware's Hosted version; avoid a 3.x host.
+  espressif/esp_hosted: '==2.12.9'
+  espressif/esp_wifi_remote: '==1.5.2'

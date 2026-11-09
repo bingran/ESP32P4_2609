@@ -9,6 +9,7 @@
 #include "esp_system.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -17,6 +18,9 @@
 #include "sd_card.h"
 #include "imu.h"
 #include "audio.h"
+#include "camera.h"
+#include "wifi_test.h"
+
 
 static const char *TAG = "MAIN";
 
@@ -26,6 +30,7 @@ uint32_t int2_count = 0;
 // =====================================================
 // SYSTEM INFORMATION
 // =====================================================
+
 
 static void print_system_info(void)
 {
@@ -66,6 +71,36 @@ static void print_system_info(void)
     printf("========================================\n");
 }
 
+static void print_memory_info(void)
+{
+    printf("\n========================================\n");
+    printf("          MEMORY DIAGNOSTIC\n");
+    printf("========================================\n");
+
+    printf("Total heap:       %u bytes\n",
+           (unsigned)heap_caps_get_total_size(MALLOC_CAP_DEFAULT));
+
+    printf("Free heap:        %u bytes\n",
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
+
+    printf("Total PSRAM:      %u bytes\n",
+           (unsigned)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
+
+    printf("Free PSRAM:       %u bytes\n",
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+
+    printf("Total DMA memory: %u bytes\n",
+           (unsigned)heap_caps_get_total_size(MALLOC_CAP_DMA));
+
+    printf("Free DMA memory:  %u bytes\n",
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA));
+
+    printf("Largest DMA:      %u bytes\n",
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+
+    printf("========================================\n\n");
+}
+
 // =====================================================
 // CONTINUOUS SENSOR MONITORING TASK
 // =====================================================
@@ -74,7 +109,10 @@ static void sensor_monitor_task(void *pvParameters)
 {
     while (1) {
 
-        // Thermistor
+        // ---------------------------------------------
+        // THERMISTOR
+        // ---------------------------------------------
+
         thermistor_reading_t reading = {0};
 
         esp_err_t ret = thermistor_read(&reading);
@@ -93,7 +131,10 @@ static void sensor_monitor_task(void *pvParameters)
                      esp_err_to_name(ret));
         }
 
+        // ---------------------------------------------
         // IMU
+        // ---------------------------------------------
+
         imu_data_t imu = {0};
 
         ret = imu_read(&imu);
@@ -130,7 +171,13 @@ static void sensor_monitor_task(void *pvParameters)
 void app_main(void)
 {
     print_system_info();
-
+    print_memory_info();
+#if CONFIG_BRINGUP_WIFI_TEST_ONLY
+    ESP_LOGI(TAG, "Wi-Fi test mode: skipping SD, camera, audio and sensors");
+    esp_err_t wifi_ret = wifi_test_run();
+    ESP_LOGI(TAG, "Wi-Fi diagnostic: %s", esp_err_to_name(wifi_ret));
+    return;
+#endif
     esp_err_t ret;
 
     // -----------------------------------------------
@@ -142,7 +189,7 @@ void app_main(void)
     ret = thermistor_init();
 
     if (ret == ESP_OK) {
-        printf("Thermistor initialized successfully.\n");
+        printf("Thermistor: PASS\n");
     } else {
         ESP_LOGE(TAG, "Thermistor initialization failed: %s",
                  esp_err_to_name(ret));
@@ -193,12 +240,49 @@ void app_main(void)
     }
 
     // -----------------------------------------------
+    // CAMERA INITIALIZATION
+    // -----------------------------------------------
+
+    printf("\nInitializing SC2336 MIPI CSI camera...\n");
+
+    esp_err_t camera_ret = ESP_ERR_INVALID_STATE;
+
+    if (audio_ret == ESP_OK) {
+
+        /*
+         * Camera shares the I2C master bus initialized by audio_init().
+         * Therefore audio_init() must run first.
+         */
+        camera_ret = camera_init();
+
+        if (camera_ret == ESP_OK) {
+            ESP_LOGI(TAG, "Starting SC2336 frame capture test...");
+
+            esp_err_t capture_ret = camera_capture_test();
+
+            if (capture_ret == ESP_OK) {
+                ESP_LOGI(TAG, "SC2336 frame capture PASS");
+            } else {
+                ESP_LOGE(TAG, "SC2336 frame capture FAIL: %s",
+                        esp_err_to_name(capture_ret));
+            }
+        }
+
+    } else {
+        ESP_LOGW(TAG,
+                 "Skipping camera test: shared audio I2C bus unavailable");
+    }
+
+    // -----------------------------------------------
     // AUDIO TESTS
     // -----------------------------------------------
 
     if (audio_ret == ESP_OK) {
 
-        // Speaker beep test
+        // -------------------------------------------
+        // SPEAKER BEEP TEST
+        // -------------------------------------------
+
         printf("\nStarting speaker test...\n");
 
         ret = audio_play_test_tone(1000, 1000);
@@ -247,10 +331,13 @@ void app_main(void)
                          esp_err_to_name(ret));
             }
 
-            // Start sensor monitoring in background
+            // ---------------------------------------
+            // BACKGROUND SENSOR MONITORING
+            // ---------------------------------------
+
             ESP_LOGI(TAG, "Starting background sensor monitoring...");
 
-            xTaskCreate(
+            BaseType_t task_ret = xTaskCreate(
                 sensor_monitor_task,
                 "sensor_monitor",
                 4096,
@@ -258,6 +345,12 @@ void app_main(void)
                 5,
                 NULL
             );
+
+            if (task_ret == pdPASS) {
+                ESP_LOGI(TAG, "Sensor monitoring task started");
+            } else {
+                ESP_LOGE(TAG, "Failed to create sensor monitoring task");
+            }
 
             // ---------------------------------------
             // ORIGINAL MUSIC PLAYBACK
@@ -285,16 +378,36 @@ void app_main(void)
     }
 
     // -----------------------------------------------
-    // CONTINUOUS SENSOR MONITORING
+    // BOARD BRING-UP SUMMARY
     // -----------------------------------------------
 
     printf("\n");
     printf("========================================\n");
-    printf("       CONTINUOUS SENSOR MONITOR\n");
+    printf("       BOARD BRING-UP SUMMARY\n");
     printf("========================================\n");
 
-    printf("Thermistor and IMU measurements every second.\n");
-    printf("----------------------------------------\n");
+    printf("Thermistor : %s\n",
+           "See initialization log");
 
-    while(1);
+    printf("IMU        : %s\n",
+           (imu_ret == ESP_OK) ? "PASS" : "FAIL");
+
+    printf("SD Card    : %s\n",
+           (sd_ret == ESP_OK) ? "PASS" : "FAIL");
+
+    printf("Audio      : %s\n",
+           (audio_ret == ESP_OK) ? "PASS" : "FAIL");
+
+    printf("Camera     : %s\n",
+           (camera_ret == ESP_OK) ? "PASS" : "FAIL");
+
+    printf("========================================\n");
+
+    // -----------------------------------------------
+    // IDLE
+    // -----------------------------------------------
+
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }
