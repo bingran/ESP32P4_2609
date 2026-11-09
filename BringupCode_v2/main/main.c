@@ -14,6 +14,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "battery.h"
 #include "thermistor.h"
 #include "sd_card.h"
 #include "imu.h"
@@ -25,6 +26,7 @@
 
 
 static const char *TAG = "MAIN";
+static bool s_battery_ready;
 static bool s_thermistor_ready;
 static bool s_imu_ready;
 static volatile bool s_web_start_finished;
@@ -126,25 +128,33 @@ static void sensor_monitor_task(void *pvParameters)
     while (1) {
         const bool log_sensor = log_cycles < 5;
 
+        thermistor_reading_t therm = {0};
+        esp_err_t therm_ret = s_thermistor_ready ? thermistor_read(&therm) : ESP_ERR_INVALID_STATE;
+        if (log_sensor && therm_ret == ESP_OK) {
+            ESP_LOGI("THERMISTOR", "GPIO50 | Raw: %4d | Voltage: %4d mV | NTC: %.0f Ohm | Temp: %.2f C",
+                     therm.raw, therm.voltage_mv, therm.resistance_ohm, therm.temperature_c);
+        } else if (log_sensor && s_thermistor_ready) {
+            ESP_LOGE("THERMISTOR", "Read failed: %s", esp_err_to_name(therm_ret));
+        }
+
         // ---------------------------------------------
-        // THERMISTOR
+        // BATTERY
         // ---------------------------------------------
 
-        thermistor_reading_t reading = {0};
+        battery_reading_t reading = {0};
 
-        esp_err_t ret = s_thermistor_ready ? thermistor_read(&reading) : ESP_ERR_INVALID_STATE;
+        esp_err_t ret = s_battery_ready ? battery_read(&reading) : ESP_ERR_INVALID_STATE;
 
         if (log_sensor && ret == ESP_OK) {
-            ESP_LOGI("THERMISTOR",
-                "GPIO50 | Raw: %4d | Voltage: %4d mV | "
-                "NTC: %8.0f Ohm | Temp: %.2f C",
+            ESP_LOGI("BATTERY",
+                "GPIO49 | Raw: %4d | ADC: %4d mV | "
+                "Battery: %4d mV",
                 reading.raw,
-                reading.voltage_mv,
-                reading.resistance_ohm,
-                reading.temperature_c
+                reading.adc_mv,
+                reading.battery_mv
             );
-        } else if (log_sensor && s_thermistor_ready) {
-            ESP_LOGE("THERMISTOR", "Read failed: %s",
+        } else if (log_sensor && s_battery_ready) {
+            ESP_LOGE("BATTERY", "Read failed: %s",
                      esp_err_to_name(ret));
         }
 
@@ -195,18 +205,22 @@ void app_main(void)
     esp_err_t ret;
 
     // -----------------------------------------------
-    // THERMISTOR
+    // BATTERY
     // -----------------------------------------------
 
-    printf("\nInitializing thermistor...\n");
+    printf("\nInitializing battery...\n");
 
-    ret = thermistor_init();
-    s_thermistor_ready = (ret == ESP_OK);
+    esp_err_t therm_ret = thermistor_init();
+    s_thermistor_ready = (therm_ret == ESP_OK);
+    ESP_LOGI(TAG, "GPIO50 thermistor initialization: %s", esp_err_to_name(therm_ret));
+
+    ret = battery_init();
+    s_battery_ready = (ret == ESP_OK);
 
     if (ret == ESP_OK) {
-        printf("Thermistor: PASS\n");
+        printf("Battery: PASS\n");
     } else {
-        ESP_LOGE(TAG, "Thermistor initialization failed: %s",
+        ESP_LOGE(TAG, "Battery initialization failed: %s",
                  esp_err_to_name(ret));
     }
 
@@ -238,7 +252,7 @@ void app_main(void)
     }
 
     // Sensor monitoring runs independently of SD, audio and Wi-Fi.
-    if (s_thermistor_ready || s_imu_ready) {
+    if (s_battery_ready || s_thermistor_ready || s_imu_ready) {
         if (xTaskCreate(sensor_monitor_task, "sensor_monitor", 4096, NULL, 5, NULL) != pdPASS) {
             ESP_LOGE(TAG, "Failed to create sensor monitoring task");
         }
@@ -407,8 +421,9 @@ void app_main(void)
     printf("       BOARD BRING-UP SUMMARY\n");
     printf("========================================\n");
 
-    printf("Thermistor : %s\n",
+    printf("Battery : %s\n",
            "See initialization log");
+    printf("Thermistor : %s\n", s_thermistor_ready ? "PASS" : "INIT FAIL");
 
     printf("IMU        : %s\n",
            (imu_ret == ESP_OK) ? "PASS" : "FAIL");

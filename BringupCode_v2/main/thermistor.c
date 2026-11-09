@@ -14,6 +14,7 @@
 #include "esp_adc/adc_cali_scheme.h"
 
 #include "thermistor.h"
+#include "adc_shared.h"
 
 // =====================================================
 // CONFIGURATION
@@ -117,13 +118,9 @@ esp_err_t thermistor_init(void)
 
     ESP_LOGI(TAG, "ADC channel mapped to GPIO%d", gpio_num);
 
-    adc_oneshot_unit_init_cfg_t init_config = {
-        .unit_id = THERM_ADC_UNIT,
-    };
-
     ESP_RETURN_ON_ERROR(
-        adc_oneshot_new_unit(
-            &init_config,
+        adc_shared_get_unit(
+            THERM_ADC_UNIT,
             &adc_handle
         ),
         TAG,

@@ -1,7 +1,9 @@
 idf_component_register(
     SRCS
         "main.c"
+        "battery.c"
         "thermistor.c"
+        "adc_shared.c"
         "sd_card.c"
         "imu.c"
         "audio.c"

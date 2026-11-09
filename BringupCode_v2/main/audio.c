@@ -54,9 +54,8 @@
 
 #define AUDIO_TONE_AMPLITUDE    28000
 
-// Microphone gain baseline.
-// Start at +20 dB to avoid unnecessarily amplifying background noise.
-#define MIC_INPUT_GAIN_DB       20.0f
+// Increase codec input gain for quiet voice recordings; check clipping diagnostics.
+#define MIC_INPUT_GAIN_DB       30.0f
 
 // =====================================================
 // GLOBAL HANDLES
@@ -969,6 +968,7 @@ esp_err_t audio_record_wav_file(
     uint32_t left_nonzero = 0;
     uint32_t right_nonzero = 0;
     uint32_t diagnostic_frames = 0;
+    uint32_t left_clipped = 0;
 
     ESP_LOGI(MIC_TAG, "Recording started...");
 
@@ -1015,6 +1015,7 @@ esp_err_t audio_record_wav_file(
 
             if (left != 0) left_nonzero++;
             if (right != 0) right_nonzero++;
+            if (left == INT16_MIN || left == INT16_MAX) left_clipped++;
         }
 
         diagnostic_frames += frames_this_block;
@@ -1098,6 +1099,12 @@ esp_err_t audio_record_wav_file(
 
         ESP_LOGI(MIC_TAG, "LEFT AC RMS : %.2f", left_rms);
         ESP_LOGI(MIC_TAG, "RIGHT AC RMS: %.2f", right_rms);
+        ESP_LOGI(MIC_TAG, "Saved LEFT RMS: %.1f dBFS; rail samples: %" PRIu32 " / %" PRIu32,
+                 20.0 * log10(fmax(left_rms, 1.0) / 32768.0),
+                 left_clipped, diagnostic_frames);
+        if (left_clipped) {
+            ESP_LOGW(MIC_TAG, "Input reached PCM limits; reduce microphone gain if voice sounds distorted");
+        }
 
         ESP_LOGI(MIC_TAG,
                  "Diagnostic frames: %" PRIu32,
