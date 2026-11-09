@@ -110,7 +110,10 @@ esp_err_t sd_card_init(void)
 
     /* GPIO39-44 are slot 0's fixed pins; slot 1 is reserved for C5 SDIO. */
     host.slot = SDMMC_HOST_SLOT_0;
-    host.max_freq_khz = SDMMC_FREQ_DEFAULT;
+    /* Diagnose slot-0 write CRC errors at a more conservative bus clock. */
+    host.max_freq_khz = 10000;
+    host.flags &= ~(SDMMC_HOST_FLAG_8BIT | SDMMC_HOST_FLAG_DDR);
+    host.flags |= SDMMC_HOST_FLAG_4BIT;
 
     // -------------------------------------------------
     // SDMMC SLOT CONFIGURATION
@@ -146,7 +149,8 @@ esp_err_t sd_card_init(void)
     ESP_LOGI(TAG, "================================");
 
     ESP_LOGI(TAG, "Mount point: %s", SD_MOUNT_POINT);
-    ESP_LOGI(TAG, "Bus width: 4-bit");
+    ESP_LOGI(TAG, "SDMMC slot: %d", host.slot);
+    ESP_LOGI(TAG, "Bus width: %d-bit", slot_config.width);
     ESP_LOGI(TAG, "Clock: %d kHz", host.max_freq_khz);
 
     // -------------------------------------------------
@@ -173,11 +177,45 @@ esp_err_t sd_card_init(void)
         return ret;
     }
 
+    /* Restore DAT3's pull-up after the temporary GPIO-high initialization.
+     * This alone did not resolve the observed 4-bit write CRC errors.
+     * Keep peripheral routing and direction unchanged. */
+    ret = gpio_pullup_en(SD_D3_GPIO);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to restore DAT3 pull-up: %s", esp_err_to_name(ret));
+        esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, sd_card_handle);
+        sd_card_handle = NULL;
+        return ret;
+    }
+    ESP_LOGI(TAG, "Slot 0 DAT3 GPIO42 pull-up restored after 4-bit initialization");
+
+    /* Controlled comparison with slot 1: the IDF IO_MUX path forces drive
+     * strength 3, unlike the GPIO-matrix path. Try default strength 2 on
+     * the same wires without changing bus width, clock or pin routing. */
+    const gpio_num_t sd_pins[] = {
+        SD_CLK_GPIO, SD_CMD_GPIO, SD_D0_GPIO, SD_D1_GPIO, SD_D2_GPIO, SD_D3_GPIO,
+    };
+    for (size_t i = 0; i < sizeof(sd_pins) / sizeof(sd_pins[0]); ++i) {
+        ret = gpio_set_drive_capability(sd_pins[i], GPIO_DRIVE_CAP_2);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set SD drive strength: %s", esp_err_to_name(ret));
+            esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, sd_card_handle);
+            sd_card_handle = NULL;
+            return ret;
+        }
+    }
+    ESP_LOGI(TAG, "SD drive strength set to 2 for slot-0 comparison");
+
     sd_mounted = true;
 
     ESP_LOGI(TAG, "SD card mounted successfully");
 
     sdmmc_card_print_info(stdout, sd_card_handle);
+    ESP_LOGI(TAG, "SD pin configuration after mount (GPIO39-44):");
+    gpio_dump_io_configuration(stdout,
+        (1ULL << SD_D0_GPIO) | (1ULL << SD_D1_GPIO) |
+        (1ULL << SD_D2_GPIO) | (1ULL << SD_D3_GPIO) |
+        (1ULL << SD_CLK_GPIO) | (1ULL << SD_CMD_GPIO));
 
     return ESP_OK;
 }

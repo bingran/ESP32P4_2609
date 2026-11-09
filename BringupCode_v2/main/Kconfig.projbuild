@@ -1,8 +1,10 @@
-menu "Board bring-up"
-    config BRINGUP_WIFI_TEST_ONLY
-        bool "Run only C5 connection and Wi-Fi scan test"
-        default n
-        help
-            Skip SD, camera, audio and sensor initialization to test the
-            C5 connection in isolation. SD uses slot 0; Hosted uses slot 1.
+menu "Router Wi-Fi settings"
+    config BRINGUP_WIFI_SSID
+        string "Router Wi-Fi name (SSID)"
+        default ""
+
+    config BRINGUP_WIFI_PASSWORD
+        string "Router Wi-Fi password"
+        default ""
+
 endmenu

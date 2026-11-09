@@ -19,10 +19,25 @@
 #include "imu.h"
 #include "audio.h"
 #include "camera.h"
-#include "wifi_test.h"
+#include "camera_web.h"
+#include "gps.h"
+#include "fingerprint.h"
 
 
 static const char *TAG = "MAIN";
+static bool s_thermistor_ready;
+static bool s_imu_ready;
+static volatile bool s_web_start_finished;
+static esp_err_t s_web_result = ESP_ERR_INVALID_STATE;
+
+static void camera_web_task(void *arg)
+{
+    (void)arg;
+    s_web_result = camera_web_start();
+    s_web_start_finished = true;
+    ESP_LOGI(TAG, "Router camera startup: %s", esp_err_to_name(s_web_result));
+    vTaskDelete(NULL);
+}
 
 uint32_t int1_count = 0;
 uint32_t int2_count = 0;
@@ -107,7 +122,9 @@ static void print_memory_info(void)
 
 static void sensor_monitor_task(void *pvParameters)
 {
+    unsigned log_cycles = 0;
     while (1) {
+        const bool log_sensor = log_cycles < 5;
 
         // ---------------------------------------------
         // THERMISTOR
@@ -115,9 +132,9 @@ static void sensor_monitor_task(void *pvParameters)
 
         thermistor_reading_t reading = {0};
 
-        esp_err_t ret = thermistor_read(&reading);
+        esp_err_t ret = s_thermistor_ready ? thermistor_read(&reading) : ESP_ERR_INVALID_STATE;
 
-        if (ret == ESP_OK) {
+        if (log_sensor && ret == ESP_OK) {
             ESP_LOGI("THERMISTOR",
                 "GPIO50 | Raw: %4d | Voltage: %4d mV | "
                 "NTC: %8.0f Ohm | Temp: %.2f C",
@@ -126,7 +143,7 @@ static void sensor_monitor_task(void *pvParameters)
                 reading.resistance_ohm,
                 reading.temperature_c
             );
-        } else {
+        } else if (log_sensor && s_thermistor_ready) {
             ESP_LOGE("THERMISTOR", "Read failed: %s",
                      esp_err_to_name(ret));
         }
@@ -137,9 +154,9 @@ static void sensor_monitor_task(void *pvParameters)
 
         imu_data_t imu = {0};
 
-        ret = imu_read(&imu);
+        ret = s_imu_ready ? imu_read(&imu) : ESP_ERR_INVALID_STATE;
 
-        if (ret == ESP_OK) {
+        if (log_sensor && ret == ESP_OK) {
             ESP_LOGI("IMU",
                 "ACC[g] X=%.3f Y=%.3f Z=%.3f | "
                 "GYRO[dps] X=%.2f Y=%.2f Z=%.2f",
@@ -152,14 +169,17 @@ static void sensor_monitor_task(void *pvParameters)
             );
         }
 
-        imu_get_interrupt_counts(&int1_count, &int2_count);
+        if (s_imu_ready) imu_get_interrupt_counts(&int1_count, &int2_count);
 
-        ESP_LOGI("IMU",
+        if (log_sensor && s_imu_ready) ESP_LOGI("IMU",
             "INTERRUPTS | INT1: %" PRIu32 " | INT2: %" PRIu32,
             int1_count,
             int2_count
         );
 
+        if (log_sensor && ++log_cycles == 5) {
+            ESP_LOGI(TAG, "ADC and IMU periodic logs stopped after 5 cycles; sensor polling continues");
+        }
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
@@ -172,12 +192,6 @@ void app_main(void)
 {
     print_system_info();
     print_memory_info();
-#if CONFIG_BRINGUP_WIFI_TEST_ONLY
-    ESP_LOGI(TAG, "Wi-Fi test mode: skipping SD, camera, audio and sensors");
-    esp_err_t wifi_ret = wifi_test_run();
-    ESP_LOGI(TAG, "Wi-Fi diagnostic: %s", esp_err_to_name(wifi_ret));
-    return;
-#endif
     esp_err_t ret;
 
     // -----------------------------------------------
@@ -187,6 +201,7 @@ void app_main(void)
     printf("\nInitializing thermistor...\n");
 
     ret = thermistor_init();
+    s_thermistor_ready = (ret == ESP_OK);
 
     if (ret == ESP_OK) {
         printf("Thermistor: PASS\n");
@@ -202,6 +217,7 @@ void app_main(void)
     printf("\nInitializing IMU...\n");
 
     esp_err_t imu_ret = imu_init();
+    s_imu_ready = (imu_ret == ESP_OK);
 
     if (imu_ret == ESP_OK) {
         printf("IMU: PASS\n");
@@ -210,6 +226,24 @@ void app_main(void)
     }
 
     // -----------------------------------------------
+    // GPS uses its own UART and background receiver alongside all modules.
+    esp_err_t gps_ret = gps_init();
+    if (gps_ret != ESP_OK) {
+        ESP_LOGE(TAG, "GPS UART/task initialization failed: %s", esp_err_to_name(gps_ret));
+    }
+
+    esp_err_t fp_ret = fingerprint_init();
+    if (fp_ret != ESP_OK) {
+        ESP_LOGE(TAG, "Fingerprint UART/task initialization failed: %s", esp_err_to_name(fp_ret));
+    }
+
+    // Sensor monitoring runs independently of SD, audio and Wi-Fi.
+    if (s_thermistor_ready || s_imu_ready) {
+        if (xTaskCreate(sensor_monitor_task, "sensor_monitor", 4096, NULL, 5, NULL) != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create sensor monitoring task");
+        }
+    }
+
     // SD CARD
     // -----------------------------------------------
 
@@ -255,7 +289,7 @@ void app_main(void)
          */
         camera_ret = camera_init();
 
-        if (camera_ret == ESP_OK) {
+        if (camera_ret == ESP_OK && sd_ret == ESP_OK) {
             ESP_LOGI(TAG, "Starting SC2336 frame capture test...");
 
             esp_err_t capture_ret = camera_capture_test();
@@ -274,6 +308,14 @@ void app_main(void)
     }
 
     // -----------------------------------------------
+    // Start networking independently; audio tests below continue while the
+    // router connects. The one-shot capture above has released the camera.
+    if (xTaskCreate(camera_web_task, "camera_web_start", 8192, NULL, 5, NULL) != pdPASS) {
+        s_web_result = ESP_ERR_NO_MEM;
+        s_web_start_finished = true;
+        ESP_LOGE(TAG, "Failed to create router camera task");
+    }
+
     // AUDIO TESTS
     // -----------------------------------------------
 
@@ -332,27 +374,6 @@ void app_main(void)
             }
 
             // ---------------------------------------
-            // BACKGROUND SENSOR MONITORING
-            // ---------------------------------------
-
-            ESP_LOGI(TAG, "Starting background sensor monitoring...");
-
-            BaseType_t task_ret = xTaskCreate(
-                sensor_monitor_task,
-                "sensor_monitor",
-                4096,
-                NULL,
-                5,
-                NULL
-            );
-
-            if (task_ret == pdPASS) {
-                ESP_LOGI(TAG, "Sensor monitoring task started");
-            } else {
-                ESP_LOGE(TAG, "Failed to create sensor monitoring task");
-            }
-
-            // ---------------------------------------
             // ORIGINAL MUSIC PLAYBACK
             // ---------------------------------------
 
@@ -400,6 +421,10 @@ void app_main(void)
 
     printf("Camera     : %s\n",
            (camera_ret == ESP_OK) ? "PASS" : "FAIL");
+    printf("GPS        : %s\n", gps_ret == ESP_OK ? "UART/TASK READY (see GPS fix log)" : "INIT FAIL");
+    printf("R503       : %s\n", fp_ret == ESP_OK ? "UART/TASK READY (see R503 log)" : "INIT FAIL");
+    printf("Router/web : %s\n", !s_web_start_finished ? "STARTING (see later log)" :
+           (s_web_result == ESP_OK ? "PASS" : "FAIL (see log)"));
 
     printf("========================================\n");
 

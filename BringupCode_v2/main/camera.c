@@ -35,13 +35,13 @@
 #define CAMERA_SCCB_FREQ        100000
 
 #define CAMERA_DEVICE_PATH      ESP_VIDEO_MIPI_CSI_DEVICE_NAME
-#define CAMERA_FRAME_PATH      "/sdcard/CAM640.bin"
-#define CAMERA_JPEG_PATH       "/sdcard/CAM640.jpg"
+#define CAMERA_FRAME_PATH      "/sdcard/CAM1080.bin"
+#define CAMERA_JPEG_PATH       "/sdcard/CAM1080.jpg"
 
 #define CAMERA_BUFFER_COUNT     2
 
-#define CAMERA_CAPTURE_WIDTH    640
-#define CAMERA_CAPTURE_HEIGHT   480
+#define CAMERA_CAPTURE_WIDTH    1920
+#define CAMERA_CAPTURE_HEIGHT   1080
 
 /* Start with YUV422 packed format. */
 #define CAMERA_CAPTURE_FORMAT   V4L2_PIX_FMT_UYVY
@@ -213,6 +213,11 @@ esp_err_t camera_init(void)
     };
 
     ESP_LOGI(TAG, "Initializing ESP-Video MIPI CSI...");
+#if CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER
+    ESP_LOGI(TAG, "ISP automatic pipeline controller enabled (exposure / white balance)");
+#else
+    ESP_LOGW(TAG, "ISP automatic pipeline controller disabled");
+#endif
 
     ret = esp_video_init(&video_config);
 
@@ -601,12 +606,23 @@ esp_err_t camera_capture_test(void)
         goto cleanup;
     }
 
-    size_t written = fwrite(
-        buffers[captured.index],
-        1,
-        captured.bytesused,
-        file
-    );
+    /* Diagnose slot-0 multi-block writes without changing the 4-bit bus.
+     * Unbuffered, sector-sized requests prevent stdio merging this frame
+     * into large bursts. This is a diagnostic, not a throughput target. */
+    if (setvbuf(file, NULL, _IONBF, 0) != 0) {
+        fclose(file);
+        ESP_LOGE(TAG, "Cannot configure unbuffered raw frame output");
+        goto cleanup;
+    }
+    ESP_LOGI(TAG, "Raw save diagnostic: 512-byte file writes, SD remains 4-bit");
+    size_t written = 0;
+    while (written < captured.bytesused) {
+        size_t chunk = captured.bytesused - written;
+        if (chunk > 512) chunk = 512;
+        size_t count = fwrite(buffers[captured.index] + written, 1, chunk, file);
+        written += count;
+        if (count != chunk) break;
+    }
 
     int close_result = fclose(file);
 
@@ -709,4 +725,126 @@ esp_err_t camera_deinit(void)
 bool camera_is_initialized(void)
 {
     return s_camera_initialized;
+}
+
+esp_err_t camera_stream_jpeg(camera_jpeg_sink_t sink, void *ctx)
+{
+    if (!s_camera_initialized || !sink) return ESP_ERR_INVALID_STATE;
+    const enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    const size_t row_bytes = CAMERA_CAPTURE_WIDTH * 2;
+    const size_t raw_bytes = row_bytes * CAMERA_CAPTURE_HEIGHT;
+    uint8_t *mapped[CAMERA_BUFFER_COUNT] = {0};
+    size_t lengths[CAMERA_BUFFER_COUNT] = {0};
+    uint8_t *input = NULL, *output = NULL;
+    size_t input_size = 0, output_size = 0;
+    jpeg_encoder_handle_t encoder = NULL;
+    bool streaming = false, requested = false;
+    esp_err_t ret = ESP_FAIL;
+    int fd = open(CAMERA_DEVICE_PATH, O_RDONLY);
+    if (fd < 0) return ESP_FAIL;
+
+    struct v4l2_format format = {.type = type};
+    format.fmt.pix.width = CAMERA_CAPTURE_WIDTH;
+    format.fmt.pix.height = CAMERA_CAPTURE_HEIGHT;
+    format.fmt.pix.pixelformat = CAMERA_CAPTURE_FORMAT;
+    format.fmt.pix.field = V4L2_FIELD_NONE;
+    format.fmt.pix.bytesperline = row_bytes;
+    format.fmt.pix.sizeimage = raw_bytes;
+    if (ioctl(fd, VIDIOC_S_FMT, &format) != 0) goto done;
+    if (format.fmt.pix.width != CAMERA_CAPTURE_WIDTH ||
+        format.fmt.pix.height != CAMERA_CAPTURE_HEIGHT ||
+        format.fmt.pix.pixelformat != CAMERA_CAPTURE_FORMAT ||
+        format.fmt.pix.bytesperline < row_bytes) {
+        ESP_LOGE(TAG, "Unsupported stream layout");
+        goto done;
+    }
+    struct v4l2_requestbuffers request = {
+        .count = CAMERA_BUFFER_COUNT, .type = type, .memory = V4L2_MEMORY_MMAP,
+    };
+    if (ioctl(fd, VIDIOC_REQBUFS, &request) != 0) goto done;
+    requested = true;
+    if (!request.count || request.count > CAMERA_BUFFER_COUNT) goto done;
+    for (uint32_t i = 0; i < request.count; ++i) {
+        struct v4l2_buffer buffer = {.type = type, .memory = V4L2_MEMORY_MMAP, .index = i};
+        if (ioctl(fd, VIDIOC_QUERYBUF, &buffer) != 0 || !buffer.length) goto done;
+        void *ptr = mmap(NULL, buffer.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, buffer.m.offset);
+        if (ptr == MAP_FAILED) goto done;
+        mapped[i] = ptr;
+        lengths[i] = buffer.length;
+        if (ioctl(fd, VIDIOC_QBUF, &buffer) != 0) goto done;
+    }
+    const jpeg_encode_memory_alloc_cfg_t in_mem = {.buffer_direction = JPEG_ENC_ALLOC_INPUT_BUFFER};
+    const jpeg_encode_memory_alloc_cfg_t out_mem = {.buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER};
+    input = jpeg_alloc_encoder_mem(raw_bytes, &in_mem, &input_size);
+    output = jpeg_alloc_encoder_mem(CAMERA_CAPTURE_WIDTH * CAMERA_CAPTURE_HEIGHT * 3 + 1024,
+                                     &out_mem, &output_size);
+    if (!input || !output) {
+        ret = ESP_ERR_NO_MEM;
+        goto done;
+    }
+    const jpeg_encode_engine_cfg_t engine = {.timeout_ms = 1000};
+    ret = jpeg_new_encoder_engine(&engine, &encoder);
+    if (ret != ESP_OK) goto done;
+    ret = ESP_FAIL;
+    if (ioctl(fd, VIDIOC_STREAMON, (void *)&type) != 0) goto done;
+    streaming = true;
+    const jpeg_encode_cfg_t cfg = {
+        .width = CAMERA_CAPTURE_WIDTH, .height = CAMERA_CAPTURE_HEIGHT,
+        .src_type = JPEG_ENCODE_IN_FORMAT_YUV422, .sub_sample = JPEG_DOWN_SAMPLING_YUV422,
+        .image_quality = 80, .pixel_reverse = false,
+    };
+    const TickType_t start = xTaskGetTickCount();
+    TickType_t last_frame = start;
+    unsigned sent = 0;
+    for (;;) {
+        struct v4l2_buffer frame = {.type = type, .memory = V4L2_MEMORY_MMAP};
+        ret = ESP_FAIL;
+        if (ioctl(fd, VIDIOC_DQBUF, &frame) != 0) break;
+        if (frame.index >= request.count) break;
+        TickType_t now = xTaskGetTickCount();
+        /* Recycle frames throughout warm-up and between sends (target at most 10 fps). */
+        if ((frame.flags & V4L2_BUF_FLAG_ERROR) ||
+            now - start < pdMS_TO_TICKS(2000) || now - last_frame < pdMS_TO_TICKS(100)) {
+            if (ioctl(fd, VIDIOC_QBUF, &frame) != 0) break;
+            continue;
+        }
+        size_t needed = (CAMERA_CAPTURE_HEIGHT - 1) * format.fmt.pix.bytesperline + row_bytes;
+        if (frame.bytesused < needed || frame.bytesused > lengths[frame.index]) {
+            ESP_LOGE(TAG, "Incomplete streaming frame");
+            break;
+        }
+        for (size_t y = 0; y < CAMERA_CAPTURE_HEIGHT; ++y) {
+            memcpy(input + y * row_bytes,
+                   mapped[frame.index] + y * format.fmt.pix.bytesperline, row_bytes);
+        }
+        if (ioctl(fd, VIDIOC_QBUF, &frame) != 0) break;
+        uint32_t jpeg_size = 0;
+        ret = jpeg_encoder_process(encoder, &cfg, input, raw_bytes, output, output_size, &jpeg_size);
+        if (ret != ESP_OK) break;
+        if (jpeg_size < 4 || jpeg_size > output_size || output[0] != 0xff || output[1] != 0xd8) {
+            ret = ESP_FAIL;
+            break;
+        }
+        ret = sink(output, jpeg_size, ctx);
+        if (ret != ESP_OK) break;
+        last_frame = now;
+        if (++sent == 1 || sent % 100 == 0) {
+            ESP_LOGI(TAG, "Stream sent %u frames; last JPEG %lu bytes", sent, (unsigned long)jpeg_size);
+        }
+    }
+
+done:
+    if (streaming) ioctl(fd, VIDIOC_STREAMOFF, (void *)&type);
+    for (unsigned i = 0; i < CAMERA_BUFFER_COUNT; ++i) {
+        if (mapped[i]) munmap(mapped[i], lengths[i]);
+    }
+    if (requested) {
+        struct v4l2_requestbuffers release = {.count = 0, .type = type, .memory = V4L2_MEMORY_MMAP};
+        ioctl(fd, VIDIOC_REQBUFS, &release);
+    }
+    close(fd);
+    if (encoder) jpeg_del_encoder_engine(encoder);
+    free(input);
+    free(output);
+    return ret;
 }

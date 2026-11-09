@@ -6,7 +6,9 @@ idf_component_register(
         "imu.c"
         "audio.c"
         "camera.c"
-        "wifi_test.c"
+        "camera_web.c"
+        "gps.c"
+        "fingerprint.c"
 
     INCLUDE_DIRS
         "."
@@ -18,6 +20,7 @@ idf_component_register(
         esp_driver_i2s
         esp_driver_jpeg
         esp_driver_sdmmc
+        esp_driver_uart
         esp_codec_dev
         spi_flash
         sdmmc
@@ -30,4 +33,5 @@ idf_component_register(
         esp_event
         esp_netif
         nvs_flash
+        esp_http_server
 )
